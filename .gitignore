@@ -1,0 +1,10 @@
+node_modules/
+dist/
+storage/
+apify_storage/
+.crawlee/
+*.js.map
+*.d.ts
+*.js
+!jest.config.js
+.env
