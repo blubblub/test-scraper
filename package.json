@@ -8,7 +8,9 @@
     "build": "tsc",
     "start": "node dist/main.js",
     "dev": "npx tsx src/main.ts",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "snapshot": "npx tsx scripts/save-snapshots.ts",
+    "test-selectors": "npx tsx scripts/test-selectors.ts"
   },
   "repository": {
     "type": "git",
