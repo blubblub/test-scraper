@@ -242,7 +242,7 @@ async function extractPrice(page: Page): Promise<Record<string, string | null>> 
             const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
             let node: Node | null;
             while ((node = walker.nextNode())) {
-                if ((node.nodeValue ?? '').trim() === 'PRICE') {
+                if ((node.nodeValue ?? '').trim().includes('PRICE')) {
                     let sibling = node.nextSibling;
                     while (sibling) {
                         if (sibling.nodeType === Node.ELEMENT_NODE) {
@@ -363,7 +363,7 @@ async function extractSpecTable(page: Page, log: Log): Promise<Record<string, st
             const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
             let node: Node | null;
             while ((node = walker.nextNode())) {
-                if ((node.nodeValue ?? '').trim() === 'DATA') {
+                if ((node.nodeValue ?? '').trim().includes('DATA')) {
                     let sibling = node.nextSibling;
                     while (sibling) {
                         if (sibling.nodeType === Node.ELEMENT_NODE &&
@@ -414,10 +414,11 @@ async function extractSpecTable(page: Page, log: Log): Promise<Record<string, st
 
             for (const row of rows) {
                 try {
-                    const cells = await row.$$('td');
-                    if (cells.length >= 2) {
-                        const rawLabel = (await cells[0].textContent())?.trim().replace(/:\s*$/, '') ?? '';
-                        const value = (await cells[1].textContent())?.trim() ?? '';
+                    const th = await row.$('th');
+                    const td = await row.$('td');
+                    if (th && td) {
+                        const rawLabel = (await th.textContent())?.trim().replace(/:\s*$/, '') ?? '';
+                        const value = (await td.textContent())?.trim() ?? '';
 
                         if (!rawLabel || !value) continue;
 
