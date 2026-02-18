@@ -152,9 +152,9 @@ router.addHandler('LIST', async (context) => {
 router.addHandler('DETAIL', async ({ page, log, request }) => {
     log.info(`Processing listing: ${request.url}`);
 
-    // Wait for detail page — avto.net uses Bootstrap cards with table.table-sm for specs
+    // Wait for detail page — try spec table variants, then any table, then heading
     try {
-        await page.waitForSelector('table.table-sm, .container h3', { timeout: 30_000 });
+        await page.waitForSelector('table.table-sm, table, .container h3', { timeout: 30_000 });
     } catch {
         log.warning(`Timeout waiting for detail page content: ${request.url}`);
         stats.recordError();
@@ -236,16 +236,39 @@ async function safeText(page: Page, selectors: string[]): Promise<string | null>
 async function extractPrice(page: Page): Promise<Record<string, string | null>> {
     const result: Record<string, string | null> = { current: null, original: null };
 
-    // Current (discounted) price
+    // Primary: find <!-- PRICE --> comment anchor and read the following sibling div
     try {
-        const currentEl = await page.$('.text-danger.font-weight-bold span, .text-danger.font-weight-bold');
-        if (currentEl) {
-            const text = await currentEl.textContent();
-            if (text?.includes('€')) result.current = text.trim();
-        }
+        const priceFromComment = await page.evaluate(() => {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
+            let node: Node | null;
+            while ((node = walker.nextNode())) {
+                if ((node.nodeValue ?? '').trim() === 'PRICE') {
+                    let sibling = node.nextSibling;
+                    while (sibling) {
+                        if (sibling.nodeType === Node.ELEMENT_NODE) {
+                            const text = (sibling as Element).textContent?.trim() ?? '';
+                            if (text) return text;
+                        }
+                        sibling = sibling.nextSibling;
+                    }
+                }
+            }
+            return null;
+        });
+        if (priceFromComment?.includes('€')) result.current = priceFromComment;
     } catch { /* skip */ }
 
-    // If no discounted price, try the non-discounted price
+    // Fallback: CSS selectors for current price
+    if (!result.current) {
+        try {
+            const currentEl = await page.$('.text-danger.font-weight-bold span, .text-danger.font-weight-bold');
+            if (currentEl) {
+                const text = await currentEl.textContent();
+                if (text?.includes('€')) result.current = text.trim();
+            }
+        } catch { /* skip */ }
+    }
+
     if (!result.current) {
         try {
             const priceEl = await page.$('.font-weight-bold span');
@@ -280,12 +303,13 @@ async function extractDescription(page: Page): Promise<string | null> {
         // appearing after the quick-stats icons and before "Osnovni podatki"
         const desc = await page.evaluate(() => {
             // Look for text nodes in the main content area that contain the description
-            const tables = document.querySelectorAll('table.table-sm');
-            if (tables.length === 0) return null;
+            // Try table.table-sm first, then any generic table
+            let firstTable = document.querySelector('table.table-sm') ??
+                document.querySelector('table');
+            if (!firstTable) return null;
 
-            // The description is typically the text between the icon row and first table
             // Walk backwards from first table to find substantial text
-            let el = tables[0].previousElementSibling;
+            let el = firstTable.previousElementSibling;
             while (el) {
                 const text = el.textContent?.trim() ?? '';
                 // Skip empty, short labels, and "Osnovni podatki"
@@ -331,40 +355,90 @@ async function extractSpecTable(page: Page, log: Log): Promise<Record<string, st
         'Emisija CO2': 'co2Emissions',
     };
 
+    // Primary: find <!-- DATA --> comment anchor and read the following sibling table
+    // That table uses <th> for labels and <td> for values
+    let usedCommentAnchor = false;
     try {
-        // Get all rows from all table.table-sm elements
-        const rows = await page.$$('table.table-sm tr');
-
-        for (const row of rows) {
-            try {
-                const cells = await row.$$('td');
-                if (cells.length >= 2) {
-                    const rawLabel = (await cells[0].textContent())?.trim().replace(/:\s*$/, '') ?? '';
-                    const value = (await cells[1].textContent())?.trim() ?? '';
-
-                    if (!rawLabel || !value) continue;
-
-                    // Try exact match first
-                    let fieldName = labelMap[rawLabel];
-
-                    // Try partial match for labels that might have slight variations
-                    if (!fieldName) {
-                        for (const [key, name] of Object.entries(labelMap)) {
-                            if (rawLabel.includes(key) || key.includes(rawLabel)) {
-                                fieldName = name;
-                                break;
+        const rowsFromComment = await page.evaluate(() => {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
+            let node: Node | null;
+            while ((node = walker.nextNode())) {
+                if ((node.nodeValue ?? '').trim() === 'DATA') {
+                    let sibling = node.nextSibling;
+                    while (sibling) {
+                        if (sibling.nodeType === Node.ELEMENT_NODE &&
+                            (sibling as Element).tagName === 'TABLE') {
+                            const table = sibling as HTMLTableElement;
+                            const pairs: Array<[string, string]> = [];
+                            for (const row of table.querySelectorAll('tr')) {
+                                const th = row.querySelector('th');
+                                const td = row.querySelector('td');
+                                if (th && td) {
+                                    const label = th.textContent?.trim().replace(/:\s*$/, '') ?? '';
+                                    const value = td.textContent?.trim() ?? '';
+                                    if (label && value) pairs.push([label, value]);
+                                }
                             }
+                            return pairs;
                         }
-                    }
-
-                    if (fieldName && value) {
-                        specs[fieldName] = value;
+                        sibling = sibling.nextSibling;
                     }
                 }
-            } catch { /* skip row */ }
+            }
+            return null;
+        });
+
+        if (rowsFromComment && rowsFromComment.length > 0) {
+            usedCommentAnchor = true;
+            for (const [rawLabel, value] of rowsFromComment) {
+                let fieldName = labelMap[rawLabel];
+                if (!fieldName) {
+                    for (const [key, name] of Object.entries(labelMap)) {
+                        if (rawLabel.includes(key) || key.includes(rawLabel)) {
+                            fieldName = name;
+                            break;
+                        }
+                    }
+                }
+                if (fieldName && value) specs[fieldName] = value;
+            }
         }
     } catch (e) {
-        log.warning(`Failed to extract spec table: ${e}`);
+        log.warning(`Failed to extract spec table via comment anchor: ${e}`);
+    }
+
+    // Fallback: table.table-sm with two <td> cells per row
+    if (!usedCommentAnchor) {
+        try {
+            const rows = await page.$$('table.table-sm tr');
+
+            for (const row of rows) {
+                try {
+                    const cells = await row.$$('td');
+                    if (cells.length >= 2) {
+                        const rawLabel = (await cells[0].textContent())?.trim().replace(/:\s*$/, '') ?? '';
+                        const value = (await cells[1].textContent())?.trim() ?? '';
+
+                        if (!rawLabel || !value) continue;
+
+                        let fieldName = labelMap[rawLabel];
+
+                        if (!fieldName) {
+                            for (const [key, name] of Object.entries(labelMap)) {
+                                if (rawLabel.includes(key) || key.includes(rawLabel)) {
+                                    fieldName = name;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (fieldName && value) specs[fieldName] = value;
+                    }
+                } catch { /* skip row */ }
+            }
+        } catch (e) {
+            log.warning(`Failed to extract spec table via CSS selector: ${e}`);
+        }
     }
 
     return specs;
@@ -420,6 +494,7 @@ async function extractImages(page: Page): Promise<string[]> {
     try {
         const imgUrls = await page.$$eval(
             [
+                '#BigPhoto img',
                 '.GO-OglasPhoto img',
                 '.GO-OglasThumb img',
                 'img[src*="images.avto.net"]',
