@@ -290,24 +290,36 @@ async function extractPrice(page: Page): Promise<Record<string, string | null>> 
  */
 async function extractDescription(page: Page): Promise<string | null> {
     try {
-        // The description is often in the text content near icon rows,
-        // appearing after the quick-stats icons and before "Osnovni podatki"
         const desc = await page.evaluate(() => {
-            // Look for text nodes in the main content area that contain the description
-            // Try table.table-sm first, then any generic table
-            let firstTable = document.querySelector('table.table-sm') ??
-                document.querySelector('table');
-            if (!firstTable) return null;
-
-            // Walk backwards from first table to find substantial text
-            let el = firstTable.previousElementSibling;
-            while (el) {
-                const text = el.textContent?.trim() ?? '';
-                // Skip empty, short labels, and "Osnovni podatki"
-                if (text.length > 30 && !text.startsWith('Osnovni podatki')) {
-                    return text;
+            // Primary: #StareOpombe div (after <!-- OPOMBE --> comment)
+            const opombe = document.querySelector('#StareOpombe');
+            if (opombe) {
+                // Extract text from <li> items if present, else raw text
+                const items = opombe.querySelectorAll('li');
+                if (items.length > 0) {
+                    return Array.from(items)
+                        .map(li => li.textContent?.trim() ?? '')
+                        .filter(Boolean)
+                        .join('\n');
                 }
-                el = el.previousElementSibling;
+                const text = opombe.textContent?.trim() ?? '';
+                if (text.length > 10) return text;
+            }
+
+            // Fallback: comment anchor <!-- OPOMBE -->
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
+            let node: Node | null;
+            while ((node = walker.nextNode())) {
+                if ((node.nodeValue ?? '').includes('OPOMBE')) {
+                    let sibling = node.nextSibling;
+                    while (sibling) {
+                        if (sibling.nodeType === Node.ELEMENT_NODE) {
+                            const text = (sibling as Element).textContent?.trim() ?? '';
+                            if (text.length > 10) return text;
+                        }
+                        sibling = sibling.nextSibling;
+                    }
+                }
             }
             return null;
         });
@@ -554,12 +566,24 @@ async function extractSellerInfo(page: Page): Promise<Record<string, string | nu
                 }
             }
 
-            // Seller name — look for fa-user icon area or card with dealer info
-            const userIcon = document.querySelector('.fa-user');
-            if (userIcon) {
-                const parent = userIcon.closest('.card-body') || userIcon.parentElement;
-                const nameEl = parent?.querySelector('a, .font-weight-bold');
-                if (nameEl) result.name = nameEl.textContent?.trim() ?? null;
+            // Seller name — in <li> after <!-- NAZIV --> comment
+            const nameWalker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
+            let nameNode: Node | null;
+            while ((nameNode = nameWalker.nextNode())) {
+                const val = (nameNode.nodeValue ?? '').replace(/-/g, '').trim();
+                if (val === 'NAZIV') {
+                    let sib = nameNode.nextSibling;
+                    while (sib) {
+                        if (sib.nodeType === Node.ELEMENT_NODE && (sib as Element).tagName === 'LI') {
+                            const html = (sib as Element).innerHTML ?? '';
+                            const firstLine = html.split(/<br\s*\/?>/i)[0]?.replace(/<[^>]*>/g, '').trim();
+                            if (firstLine) result.name = firstLine;
+                            break;
+                        }
+                        sib = sib.nextSibling;
+                    }
+                    if (result.name) break;
+                }
             }
 
             // Location — from "Kraj ogleda" in specs or fa-map-marker
