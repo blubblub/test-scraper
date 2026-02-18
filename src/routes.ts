@@ -236,63 +236,45 @@ async function safeText(page: Page, selectors: string[]): Promise<string | null>
 async function extractPrice(page: Page): Promise<Record<string, string | null>> {
     const result: Record<string, string | null> = { current: null, original: null };
 
-    // Primary: find <!-- PRICE --> comment anchor and read the following sibling div
+    // Primary: parse individual <span> elements inside card-body .h2/.h1 paragraphs
+    // Desktop price card is after <!-- PRICE --> comment (not mobile).
+    // Each price is in its own <p class="h2"><span>15.470 €</span></p>
+    // The card-header before each price block says "REDNA CENA" or "CENA S FINANCIRANJEM"
     try {
-        const priceFromComment = await page.evaluate(() => {
-            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
-            let node: Node | null;
-            while ((node = walker.nextNode())) {
-                if ((node.nodeValue ?? '').trim().includes('PRICE')) {
-                    let sibling = node.nextSibling;
-                    while (sibling) {
-                        if (sibling.nodeType === Node.ELEMENT_NODE) {
-                            const text = (sibling as Element).textContent?.trim() ?? '';
-                            if (text) return text;
-                        }
-                        sibling = sibling.nextSibling;
-                    }
-                }
+        const prices = await page.evaluate(() => {
+            const res: Record<string, string | null> = { current: null, original: null };
+            // Target desktop price card (d-none d-lg-block or the row after PRICE comment)
+            const priceEls = document.querySelectorAll('.card-body .h2 span, .card-body .h1 span');
+            const priceTexts: string[] = [];
+            for (const el of priceEls) {
+                const text = el.textContent?.trim() ?? '';
+                if (text.match(/[\d.]+\s*€/)) priceTexts.push(text);
             }
-            return null;
+            // Deduplicate (mobile + desktop show same prices)
+            const unique = [...new Set(priceTexts)];
+            if (unique.length >= 2) {
+                // First = regular price, second = financing/discounted price
+                res.current = unique[0];
+                res.original = unique[0];
+                // The lower/financing price
+                res.current = unique[1];
+            } else if (unique.length === 1) {
+                res.current = unique[0];
+            }
+            return res;
         });
-        if (priceFromComment?.includes('€')) result.current = priceFromComment;
+        if (prices.current) result.current = prices.current;
+        if (prices.original) result.original = prices.original;
     } catch { /* skip */ }
 
-    // Fallback: parse card-body sections for regular and financing prices
-    if (!result.current) {
-        try {
-            const prices = await page.evaluate(() => {
-                const res: Record<string, string | null> = { current: null, original: null };
-                // Find price spans in h1/h2 elements within card-body
-                const priceEls = document.querySelectorAll('.card-body .h2 span, .card-body .h1 span');
-                const priceTexts: string[] = [];
-                for (const el of priceEls) {
-                    const text = el.textContent?.trim() ?? '';
-                    if (text.includes('€')) priceTexts.push(text);
-                }
-                // Deduplicate (mobile + desktop show same prices)
-                const unique = [...new Set(priceTexts)];
-                if (unique.length >= 2) {
-                    // First = regular price, second = financing/discounted price
-                    res.original = unique[0];
-                    res.current = unique[1];
-                } else if (unique.length === 1) {
-                    res.current = unique[0];
-                }
-                return res;
-            });
-            if (prices.current) result.current = prices.current;
-            if (prices.original) result.original = prices.original;
-        } catch { /* skip */ }
-    }
-
-    // Final fallback: any price-like span
+    // Fallback: any price-like span with €
     if (!result.current) {
         try {
             const priceEl = await page.$('.font-weight-bold span');
             if (priceEl) {
                 const text = await priceEl.textContent();
-                if (text?.includes('€')) result.current = text.trim();
+                const match = text?.match(/[\d.]+\s*€/);
+                if (match) result.current = match[0].trim();
             }
         } catch { /* skip */ }
     }
@@ -559,6 +541,17 @@ async function extractSellerInfo(page: Page): Promise<Record<string, string | nu
             if (telLinks.length > 0) {
                 const href = telLinks[0].getAttribute('href') ?? '';
                 result.phone = href.replace('tel:', '').trim() || null;
+            }
+
+            // Fallback: find phone icon and extract just the number with regex
+            if (!result.phone) {
+                const phoneIcon = document.querySelector('.fa-phone-square, .fa-phone');
+                if (phoneIcon) {
+                    const container = phoneIcon.closest('li, .list-group-item') || phoneIcon.parentElement;
+                    const text = container?.textContent ?? '';
+                    const match = text.match(/[\d][\d\s/\-]{5,}/);
+                    if (match) result.phone = match[0].replace(/[\s/\-]+$/g, '').trim();
+                }
             }
 
             // Seller name — look for fa-user icon area or card with dealer info
