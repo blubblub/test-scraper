@@ -258,17 +258,35 @@ async function extractPrice(page: Page): Promise<Record<string, string | null>> 
         if (priceFromComment?.includes('€')) result.current = priceFromComment;
     } catch { /* skip */ }
 
-    // Fallback: CSS selectors for current price
+    // Fallback: parse card-body sections for regular and financing prices
     if (!result.current) {
         try {
-            const currentEl = await page.$('.text-danger.font-weight-bold span, .text-danger.font-weight-bold');
-            if (currentEl) {
-                const text = await currentEl.textContent();
-                if (text?.includes('€')) result.current = text.trim();
-            }
+            const prices = await page.evaluate(() => {
+                const res: Record<string, string | null> = { current: null, original: null };
+                // Find price spans in h1/h2 elements within card-body
+                const priceEls = document.querySelectorAll('.card-body .h2 span, .card-body .h1 span');
+                const priceTexts: string[] = [];
+                for (const el of priceEls) {
+                    const text = el.textContent?.trim() ?? '';
+                    if (text.includes('€')) priceTexts.push(text);
+                }
+                // Deduplicate (mobile + desktop show same prices)
+                const unique = [...new Set(priceTexts)];
+                if (unique.length >= 2) {
+                    // First = regular price, second = financing/discounted price
+                    res.original = unique[0];
+                    res.current = unique[1];
+                } else if (unique.length === 1) {
+                    res.current = unique[0];
+                }
+                return res;
+            });
+            if (prices.current) result.current = prices.current;
+            if (prices.original) result.original = prices.original;
         } catch { /* skip */ }
     }
 
+    // Final fallback: any price-like span
     if (!result.current) {
         try {
             const priceEl = await page.$('.font-weight-bold span');
@@ -278,15 +296,6 @@ async function extractPrice(page: Page): Promise<Record<string, string | null>> 
             }
         } catch { /* skip */ }
     }
-
-    // Original price (crossed out)
-    try {
-        const oldEl = await page.$('.GO-OglasDataStaraCena span');
-        if (oldEl) {
-            const text = await oldEl.textContent();
-            if (text?.includes('€')) result.original = text.trim();
-        }
-    } catch { /* skip */ }
 
     return result;
 }
@@ -545,20 +554,11 @@ async function extractSellerInfo(page: Page): Promise<Record<string, string | nu
                 name: null, type: null, location: null, phone: null,
             };
 
-            // Phone — look for fa-phone-square icon, the link next to it
-            const phoneIcon = document.querySelector('.fa-phone-square');
-            if (phoneIcon) {
-                const phoneLink = phoneIcon.closest('a') ||
-                    phoneIcon.parentElement?.querySelector('a[href^="tel:"]') ||
-                    phoneIcon.parentElement?.nextElementSibling;
-                if (phoneLink) {
-                    result.phone = phoneLink.textContent?.trim() ?? null;
-                }
-            }
-            // Fallback: any tel: link
-            if (!result.phone) {
-                const telLink = document.querySelector('a[href^="tel:"]');
-                if (telLink) result.phone = telLink.textContent?.trim() ?? null;
+            // Phone — extract from tel: link href (avoids picking up label text like "PRODAJA VOZIL")
+            const telLinks = document.querySelectorAll('a[href^="tel:"]');
+            if (telLinks.length > 0) {
+                const href = telLinks[0].getAttribute('href') ?? '';
+                result.phone = href.replace('tel:', '').trim() || null;
             }
 
             // Seller name — look for fa-user icon area or card with dealer info
