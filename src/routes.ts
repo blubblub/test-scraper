@@ -148,12 +148,13 @@ router.addHandler('LIST', async (context) => {
 });
 
 // Handler for individual listing detail pages (Issue #3)
+// Selectors verified against real avto.net DOM (2026-02-18)
 router.addHandler('DETAIL', async ({ page, log, request }) => {
     log.info(`Processing listing: ${request.url}`);
 
-    // Wait for the detail page to load
+    // Wait for detail page — try spec table variants, then any table, then heading
     try {
-        await page.waitForSelector('.OglasData, .container, .classified-content', { timeout: 30_000 });
+        await page.waitForSelector('table.table-sm, table, .container h3', { timeout: 30_000 });
     } catch {
         log.warning(`Timeout waiting for detail page content: ${request.url}`);
         stats.recordError();
@@ -179,31 +180,25 @@ function extractListingId(url: string): string {
 
 /**
  * Extract all vehicle details from a listing detail page.
+ * Selectors based on real avto.net DOM inspection (Bootstrap 4 layout).
  */
 async function extractListingDetails(page: Page, log: Log): Promise<Record<string, unknown>> {
     const data: Record<string, unknown> = {};
 
-    // Title
-    data.title = await safeText(page, [
-        'h1',
-        '.OglasNaslov',
-        '.classified-title h1',
-    ]);
+    // Title — avto.net uses a plain h3 (no class) for the listing title
+    data.title = await safeText(page, ['h3']);
 
-    // Price
+    // Price — current price is in span inside .h2.font-weight-bold.text-danger
+    // Old/crossed-out price is in .h2.GO-OglasDataStaraCena
     data.price = await extractPrice(page);
 
-    // Main technical specs from the table/grid
+    // Description — text before the spec tables, often in a card body
+    // avto.net puts the short description as plain text (e.g. "E-PERFORMANCE 2.0D + ...")
+    data.description = await extractDescription(page);
+
+    // Main technical specs from table.table-sm rows
     const specs = await extractSpecTable(page, log);
     Object.assign(data, specs);
-
-    // Description
-    data.description = await safeText(page, [
-        '.OglasOpisPolje',
-        '.classified-description',
-        '#TextContent',
-        'div[itemprop="description"]',
-    ]);
 
     // Equipment / extras list
     data.equipment = await extractEquipment(page);
@@ -235,102 +230,216 @@ async function safeText(page: Page, selectors: string[]): Promise<string | null>
 
 /**
  * Extract price from the page.
+ * Real DOM: current price span is inside an element with classes
+ * "h2 font-weight-bold text-danger mb-3". Old price uses "GO-OglasDataStaraCena".
  */
-async function extractPrice(page: Page): Promise<string | null> {
-    const priceSelectors = [
-        '.OglasCenaBox',
-        '.price',
-        'span[itemprop="price"]',
-        '.classified-price',
-    ];
-    const raw = await safeText(page, priceSelectors);
-    if (raw) {
-        // Clean up: keep digits, dots, commas, and currency symbols
-        return raw.replace(/\s+/g, ' ').trim();
+async function extractPrice(page: Page): Promise<Record<string, string | null>> {
+    const result: Record<string, string | null> = { current: null, original: null };
+
+    // Primary: find <!-- PRICE --> comment anchor and read the following sibling div
+    try {
+        const priceFromComment = await page.evaluate(() => {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
+            let node: Node | null;
+            while ((node = walker.nextNode())) {
+                if ((node.nodeValue ?? '').trim().includes('PRICE')) {
+                    let sibling = node.nextSibling;
+                    while (sibling) {
+                        if (sibling.nodeType === Node.ELEMENT_NODE) {
+                            const text = (sibling as Element).textContent?.trim() ?? '';
+                            if (text) return text;
+                        }
+                        sibling = sibling.nextSibling;
+                    }
+                }
+            }
+            return null;
+        });
+        if (priceFromComment?.includes('€')) result.current = priceFromComment;
+    } catch { /* skip */ }
+
+    // Fallback: CSS selectors for current price
+    if (!result.current) {
+        try {
+            const currentEl = await page.$('.text-danger.font-weight-bold span, .text-danger.font-weight-bold');
+            if (currentEl) {
+                const text = await currentEl.textContent();
+                if (text?.includes('€')) result.current = text.trim();
+            }
+        } catch { /* skip */ }
     }
-    return null;
+
+    if (!result.current) {
+        try {
+            const priceEl = await page.$('.font-weight-bold span');
+            if (priceEl) {
+                const text = await priceEl.textContent();
+                if (text?.includes('€')) result.current = text.trim();
+            }
+        } catch { /* skip */ }
+    }
+
+    // Original price (crossed out)
+    try {
+        const oldEl = await page.$('.GO-OglasDataStaraCena span');
+        if (oldEl) {
+            const text = await oldEl.textContent();
+            if (text?.includes('€')) result.original = text.trim();
+        }
+    } catch { /* skip */ }
+
+    return result;
+}
+
+/**
+ * Extract the description text.
+ * On avto.net, the description appears as text content between the title/price
+ * area and the spec tables — usually a short line like
+ * "E-PERFORMANCE 2.0D + ZNANA SERVISNA ZGODOVINA + ..."
+ */
+async function extractDescription(page: Page): Promise<string | null> {
+    try {
+        // The description is often in the text content near icon rows,
+        // appearing after the quick-stats icons and before "Osnovni podatki"
+        const desc = await page.evaluate(() => {
+            // Look for text nodes in the main content area that contain the description
+            // Try table.table-sm first, then any generic table
+            let firstTable = document.querySelector('table.table-sm') ??
+                document.querySelector('table');
+            if (!firstTable) return null;
+
+            // Walk backwards from first table to find substantial text
+            let el = firstTable.previousElementSibling;
+            while (el) {
+                const text = el.textContent?.trim() ?? '';
+                // Skip empty, short labels, and "Osnovni podatki"
+                if (text.length > 30 && !text.startsWith('Osnovni podatki')) {
+                    return text;
+                }
+                el = el.previousElementSibling;
+            }
+            return null;
+        });
+        return desc;
+    } catch {
+        return null;
+    }
 }
 
 /**
  * Extract spec table key/value pairs.
- * avto.net uses table rows with label + value pairs.
+ * avto.net uses table.table-sm with rows containing tab-separated label:\tvalue.
+ * First table is "Osnovni podatki" (basic info), others are fuel/equipment.
  */
 async function extractSpecTable(page: Page, log: Log): Promise<Record<string, string | null>> {
     const specs: Record<string, string | null> = {};
 
-    // Map of Slovenian labels to our field names
+    // Map Slovenian labels to our field names
     const labelMap: Record<string, string> = {
-        'Znamka': 'make',
-        'Model': 'model',
-        'Tip': 'variant',
-        'Leto': 'year',
-        '1. registracija': 'firstRegistration',
+        'Starost': 'condition',
+        'Leto proizvodnje': 'year',
         'Prva registracija': 'firstRegistration',
-        'Prevoženih': 'mileage',
         'Prevoženi km': 'mileage',
-        'Kilometri': 'mileage',
+        'Tehnični pregled velja do': 'technicalInspection',
         'Gorivo': 'fuelType',
+        'Motor': 'engine',
         'Menjalnik': 'transmission',
-        'Prostornina motorja': 'engineDisplacement',
-        'Motor': 'engineDisplacement',
-        'Moč': 'power',
-        'Moč motorja': 'power',
         'Oblika': 'bodyType',
-        'Karoserija': 'bodyType',
+        'Št.vrat': 'doors',
         'Barva': 'colorExterior',
         'Notranjost': 'colorInterior',
-        'Barva notranjosti': 'colorInterior',
-        'Število vrat': 'doors',
-        'Vrata': 'doors',
-        'Število lastnikov': 'owners',
-        'Lastniki': 'owners',
-        'Št. lastnikov': 'owners',
-        'VIN': 'vin',
+        'VIN / številka šasije': 'vin',
+        'Kraj ogleda': 'viewingLocation',
+        'Kombinirana vožnja': 'fuelConsumption',
         'Emisijski razred': 'emissionClass',
-        'Datum oglasa': 'listingDate',
+        'Emisija CO2': 'co2Emissions',
     };
 
+    // Primary: find <!-- DATA --> comment anchor and read the following sibling table
+    // That table uses <th> for labels and <td> for values
+    let usedCommentAnchor = false;
     try {
-        // Try multiple table structures avto.net uses
-        const rows = await page.$$([
-            '.OglasDetail table tr',
-            '.OglasTeh662 table tr',
-            '.OglasData table tr',
-            '.classified-specs tr',
-            'table.table-bordered tr',
-        ].join(', '));
-
-        for (const row of rows) {
-            try {
-                const cells = await row.$$('td, th');
-                if (cells.length >= 2) {
-                    const label = (await cells[0].textContent())?.trim().replace(/:$/, '') ?? '';
-                    const value = (await cells[1].textContent())?.trim() ?? '';
-
-                    const fieldName = labelMap[label];
-                    if (fieldName && value) {
-                        specs[fieldName] = value;
+        const rowsFromComment = await page.evaluate(() => {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
+            let node: Node | null;
+            while ((node = walker.nextNode())) {
+                if ((node.nodeValue ?? '').trim().includes('DATA')) {
+                    let sibling = node.nextSibling;
+                    while (sibling) {
+                        if (sibling.nodeType === Node.ELEMENT_NODE &&
+                            (sibling as Element).tagName === 'TABLE') {
+                            const table = sibling as HTMLTableElement;
+                            const pairs: Array<[string, string]> = [];
+                            for (const row of table.querySelectorAll('tr')) {
+                                const th = row.querySelector('th');
+                                const td = row.querySelector('td');
+                                if (th && td) {
+                                    const label = th.textContent?.trim().replace(/:\s*$/, '') ?? '';
+                                    const value = td.textContent?.trim() ?? '';
+                                    if (label && value) pairs.push([label, value]);
+                                }
+                            }
+                            return pairs;
+                        }
+                        sibling = sibling.nextSibling;
                     }
                 }
-            } catch { /* skip row */ }
-        }
+            }
+            return null;
+        });
 
-        // Also try div-based label/value layout
-        if (Object.keys(specs).length === 0) {
-            const divPairs = await page.$$('.OglasDetail .Podatek, .OglasData .Podatek');
-            for (const pair of divPairs) {
-                try {
-                    const label = await pair.$eval('.Lastnost, .label', (el) => el.textContent?.trim().replace(/:$/, '') ?? '');
-                    const value = await pair.$eval('.Vrednost, .value', (el) => el.textContent?.trim() ?? '');
-                    const fieldName = labelMap[label];
-                    if (fieldName && value) {
-                        specs[fieldName] = value;
+        if (rowsFromComment && rowsFromComment.length > 0) {
+            usedCommentAnchor = true;
+            for (const [rawLabel, value] of rowsFromComment) {
+                let fieldName = labelMap[rawLabel];
+                if (!fieldName) {
+                    for (const [key, name] of Object.entries(labelMap)) {
+                        if (rawLabel.includes(key) || key.includes(rawLabel)) {
+                            fieldName = name;
+                            break;
+                        }
                     }
-                } catch { /* skip */ }
+                }
+                if (fieldName && value) specs[fieldName] = value;
             }
         }
     } catch (e) {
-        log.warning(`Failed to extract spec table: ${e}`);
+        log.warning(`Failed to extract spec table via comment anchor: ${e}`);
+    }
+
+    // Fallback: table.table-sm with two <td> cells per row
+    if (!usedCommentAnchor) {
+        try {
+            const rows = await page.$$('table.table-sm tr');
+
+            for (const row of rows) {
+                try {
+                    const th = await row.$('th');
+                    const td = await row.$('td');
+                    if (th && td) {
+                        const rawLabel = (await th.textContent())?.trim().replace(/:\s*$/, '') ?? '';
+                        const value = (await td.textContent())?.trim() ?? '';
+
+                        if (!rawLabel || !value) continue;
+
+                        let fieldName = labelMap[rawLabel];
+
+                        if (!fieldName) {
+                            for (const [key, name] of Object.entries(labelMap)) {
+                                if (rawLabel.includes(key) || key.includes(rawLabel)) {
+                                    fieldName = name;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (fieldName && value) specs[fieldName] = value;
+                    }
+                } catch { /* skip row */ }
+            }
+        } catch (e) {
+            log.warning(`Failed to extract spec table via CSS selector: ${e}`);
+        }
     }
 
     return specs;
@@ -338,50 +447,58 @@ async function extractSpecTable(page: Page, log: Log): Promise<Record<string, st
 
 /**
  * Extract equipment/extras list.
+ * avto.net puts equipment in the 4th table.table-sm under categorized sections
+ * like "Podvozje:", "Varnost:", "Notranjost:" with items as text nodes.
  */
 async function extractEquipment(page: Page): Promise<string[]> {
     const equipment: string[] = [];
 
-    const selectors = [
-        '.OglasOprema li',
-        '.OglasOpremaBox li',
-        '.equipment-list li',
-        '.classified-features li',
-        '.OglasData .Oprema li',
-    ];
+    try {
+        // Equipment items are in table cells, often as line-separated text
+        const items = await page.evaluate(() => {
+            const tables = document.querySelectorAll('table.table-sm');
+            const results: string[] = [];
 
-    for (const sel of selectors) {
-        try {
-            const items = await page.$$eval(sel, (els) =>
-                els.map((el) => el.textContent?.trim() ?? '').filter(Boolean),
-            );
-            if (items.length > 0) {
-                equipment.push(...items);
-                break;
+            // The equipment table is typically the one with "Oprema" in its header
+            for (const table of tables) {
+                const headerText = table.querySelector('tr:first-child')?.textContent ?? '';
+                if (headerText.includes('Oprema') || headerText.includes('oprema')) {
+                    // Extract all text content from cells
+                    const cells = table.querySelectorAll('td');
+                    for (const cell of cells) {
+                        const text = cell.textContent?.trim() ?? '';
+                        // Split multi-line items
+                        const lines = text.split('\n')
+                            .map(l => l.trim())
+                            .filter(l => l.length > 2 && !l.endsWith(':'));
+                        results.push(...lines);
+                    }
+                }
             }
-        } catch { /* try next */ }
-    }
 
-    return [...new Set(equipment)];
+            return results;
+        });
+
+        equipment.push(...items);
+    } catch { /* no equipment */ }
+
+    return [...new Set(equipment)].filter(Boolean);
 }
 
 /**
  * Extract all image URLs from the listing.
+ * avto.net uses GO-OglasPhoto/GO-OglasThumb classes and images.avto.net domain.
  */
 async function extractImages(page: Page): Promise<string[]> {
     const images: string[] = [];
 
     try {
-        // Try multiple image container patterns
         const imgUrls = await page.$$eval(
             [
-                '.OglasSlika img',
-                '.OglasSlike img',
-                '.classified-gallery img',
-                '.fotorama img',
-                '.rsImg img',
+                '#BigPhoto img',
+                '.GO-OglasPhoto img',
+                '.GO-OglasThumb img',
                 'img[src*="images.avto.net"]',
-                'a[href*="images.avto.net"] img',
             ].join(', '),
             (imgs) => imgs.map((img) => {
                 const src = (img as HTMLImageElement).src ||
@@ -393,12 +510,12 @@ async function extractImages(page: Page): Promise<string[]> {
 
         images.push(...imgUrls);
 
-        // Also check for full-size image links
-        const fullLinks = await page.$$eval(
-            'a[href*="images.avto.net"]',
+        // Also check for full-size zoom links
+        const zoomLinks = await page.$$eval(
+            '.GO-OglasZoom a[href*="images.avto.net"], .GO-OglasZoomBlack[href*="images.avto.net"]',
             (links) => links.map((a) => (a as HTMLAnchorElement).href).filter(Boolean),
         );
-        images.push(...fullLinks);
+        images.push(...zoomLinks);
     } catch { /* no images */ }
 
     // Deduplicate and prefer full-size images
@@ -409,6 +526,8 @@ async function extractImages(page: Page): Promise<string[]> {
 
 /**
  * Extract seller information.
+ * avto.net uses card layout with fa-* icons for seller details.
+ * Location is in "Kraj ogleda" spec field. Phone uses fa-phone-square icon.
  */
 async function extractSellerInfo(page: Page): Promise<Record<string, string | null>> {
     const seller: Record<string, string | null> = {
@@ -418,38 +537,56 @@ async function extractSellerInfo(page: Page): Promise<Record<string, string | nu
         phone: null,
     };
 
-    // Seller name
-    seller.name = await safeText(page, [
-        '.OglasProdajalec a',
-        '.OglasProdajalec',
-        '.seller-name',
-        '.classified-seller-name',
-    ]);
-
-    // Determine seller type (dealer vs private)
     try {
-        const sellerArea = await page.$('.OglasProdajalec, .seller-info');
-        if (sellerArea) {
-            const text = (await sellerArea.textContent())?.toLowerCase() ?? '';
-            seller.type = text.includes('prodajalec') || text.includes('salon') || text.includes('dealer')
-                ? 'dealer' : 'private';
-        }
+        // Seller info is typically in a card with fa-user icon
+        // The seller name/link is near dealer branding or in the card footer area
+        const sellerData = await page.evaluate(() => {
+            const result: Record<string, string | null> = {
+                name: null, type: null, location: null, phone: null,
+            };
+
+            // Phone — look for fa-phone-square icon, the link next to it
+            const phoneIcon = document.querySelector('.fa-phone-square');
+            if (phoneIcon) {
+                const phoneLink = phoneIcon.closest('a') ||
+                    phoneIcon.parentElement?.querySelector('a[href^="tel:"]') ||
+                    phoneIcon.parentElement?.nextElementSibling;
+                if (phoneLink) {
+                    result.phone = phoneLink.textContent?.trim() ?? null;
+                }
+            }
+            // Fallback: any tel: link
+            if (!result.phone) {
+                const telLink = document.querySelector('a[href^="tel:"]');
+                if (telLink) result.phone = telLink.textContent?.trim() ?? null;
+            }
+
+            // Seller name — look for fa-user icon area or card with dealer info
+            const userIcon = document.querySelector('.fa-user');
+            if (userIcon) {
+                const parent = userIcon.closest('.card-body') || userIcon.parentElement;
+                const nameEl = parent?.querySelector('a, .font-weight-bold');
+                if (nameEl) result.name = nameEl.textContent?.trim() ?? null;
+            }
+
+            // Location — from "Kraj ogleda" in specs or fa-map-marker
+            const mapIcon = document.querySelector('.fa-map-marker');
+            if (mapIcon) {
+                const parent = mapIcon.parentElement;
+                if (parent) {
+                    result.location = parent.textContent?.replace(/^\s*/, '').trim() ?? null;
+                }
+            }
+
+            // Seller type — check for flaticon-109-car-dealer (dealer) presence
+            const dealerIcon = document.querySelector('.flaticon-109-car-dealer');
+            result.type = dealerIcon ? 'dealer' : 'private';
+
+            return result;
+        });
+
+        Object.assign(seller, sellerData);
     } catch { /* skip */ }
-
-    // Location
-    seller.location = await safeText(page, [
-        '.OglasLokacija',
-        '.OglasProdajalec .lokacija',
-        '.seller-location',
-    ]);
-
-    // Phone
-    seller.phone = await safeText(page, [
-        '.OglasTelefon a',
-        '.OglasTelefon',
-        '.seller-phone',
-        'a[href^="tel:"]',
-    ]);
 
     return seller;
 }
