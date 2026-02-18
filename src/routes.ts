@@ -566,25 +566,24 @@ async function extractSellerInfo(page: Page): Promise<Record<string, string | nu
                 }
             }
 
-            // Seller name — in the "Prodajalec" section after <!-- SHOW DATA NAZIV -->
-            const prodajalecHeader = Array.from(document.querySelectorAll('.GO-bg-navy'))
-                .find(el => el.textContent?.includes('Prodajalec'));
-            if (prodajalecHeader) {
-                const card = prodajalecHeader.closest('.row') ?? prodajalecHeader.parentElement;
-                if (card) {
-                    const strong = card.querySelector('strong');
-                    if (strong) result.name = strong.textContent?.trim() ?? null;
+            // Seller name — in <li> after <!-- NAZIV --> comment
+            const nameWalker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
+            let nameNode: Node | null;
+            while ((nameNode = nameWalker.nextNode())) {
+                const val = (nameNode.nodeValue ?? '').replace(/-/g, '').trim();
+                if (val === 'NAZIV') {
+                    let sib = nameNode.nextSibling;
+                    while (sib) {
+                        if (sib.nodeType === Node.ELEMENT_NODE && (sib as Element).tagName === 'LI') {
+                            const html = (sib as Element).innerHTML ?? '';
+                            const firstLine = html.split(/<br\s*\/?>/i)[0]?.replace(/<[^>]*>/g, '').trim();
+                            if (firstLine) result.name = firstLine;
+                            break;
+                        }
+                        sib = sib.nextSibling;
+                    }
+                    if (result.name) break;
                 }
-            }
-            // Fallback: fa-user icon area
-            if (!result.name) {
-                const userIcon = document.querySelector('.fa-user');
-                if (userIcon) {
-                    const parent = userIcon.closest('.card-body') || userIcon.parentElement;
-                    const nameEl = parent?.querySelector('a, .font-weight-bold');
-                    if (nameEl) result.name = nameEl.textContent?.trim() ?? null;
-                }
-
             }
 
             // Location — from "Kraj ogleda" in specs or fa-map-marker
