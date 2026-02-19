@@ -28,8 +28,10 @@ export interface SearchFilters {
 }
 
 export interface CrawlerConfig {
-    /** Max pages to crawl (0 = unlimited) */
+    /** Max search result pages to crawl (0 = unlimited) */
     maxPages: number;
+    /** Max detail pages to scrape (0 = unlimited, -1 = skip details) */
+    maxDetails: number;
     /** Max total requests (safety limit) */
     maxRequests: number;
     /** Min delay between requests in ms */
@@ -116,6 +118,7 @@ export function loadFiltersFromEnv(): SearchFilters {
 export function loadCrawlerConfig(): CrawlerConfig {
     return {
         maxPages: Number(process.env.MAX_PAGES) || 0,
+        maxDetails: process.env.MAX_DETAILS !== undefined ? Number(process.env.MAX_DETAILS) : 0,
         maxRequests: Number(process.env.MAX_REQUESTS) || 1000,
         minDelayMs: Number(process.env.MIN_DELAY_MS) || 2000,
         maxDelayMs: Number(process.env.MAX_DELAY_MS) || 5000,

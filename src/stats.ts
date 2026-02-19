@@ -8,6 +8,7 @@ export class CrawlerStats {
     private pagesProcessed = 0;
     private listingsFound = 0;
     private listingsEnqueued = 0;
+    private detailsScraped = 0;
     private errors = 0;
     private startTime: number;
     private log: Log;
@@ -26,6 +27,14 @@ export class CrawlerStats {
 
     recordEnqueued(count: number): void {
         this.listingsEnqueued += count;
+    }
+
+    getEnqueuedCount(): number {
+        return this.listingsEnqueued;
+    }
+
+    recordDetail(): void {
+        this.detailsScraped++;
     }
 
     recordError(): void {
@@ -65,6 +74,7 @@ export class CrawlerStats {
         pagesProcessed: number;
         listingsFound: number;
         listingsEnqueued: number;
+        detailsScraped: number;
         uniqueUrls: number;
         errors: number;
         elapsedSeconds: number;
@@ -73,6 +83,7 @@ export class CrawlerStats {
             pagesProcessed: this.pagesProcessed,
             listingsFound: this.listingsFound,
             listingsEnqueued: this.listingsEnqueued,
+            detailsScraped: this.detailsScraped,
             uniqueUrls: this.seenUrls.size,
             errors: this.errors,
             elapsedSeconds: (Date.now() - this.startTime) / 1000,
