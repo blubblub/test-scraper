@@ -47,17 +47,17 @@ for (const file of snapshotFiles) {
         const href = $row.find('a[href*="details.asp"]').attr('href');
         if (href) urls++;
 
-        // Price
-        const price = $row.find('.GO-Results-Top-Price-TXT-Regular').text().trim();
+        // Price — two layout variants
+        const price = $row.find('.GO-Results-Top-Price-TXT-Regular, .GO-Results-Price-TXT-Regular').first().text().trim();
         if (price) prices++;
 
-        // Thumbnail
-        const img = $row.find('.GO-Results-Top-Photo img').first();
+        // Thumbnail — two layout variants
+        const img = $row.find('.GO-Results-Top-Photo img, .GO-Results-Photo img').first();
         const src = img.attr('src') || img.attr('data-src');
         if (src) thumbnails++;
 
-        // Specs table
-        const specRows = $row.find('.GO-Results-Top-Data-Top:not(.d-none) table tr');
+        // Specs table — two layout variants
+        const specRows = $row.find('.GO-Results-Top-Data-Top:not(.d-none) table tr, .GO-Results-Data table tr');
         if (specRows.length > 0) specs++;
     });
 

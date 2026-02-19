@@ -116,16 +116,16 @@ async function extractSearchListings(page: Page, log: Log): Promise<SearchListin
                     listing.listingId = idMatch?.[1] ?? null;
                 }
 
-                // Price
-                const priceEl = row.querySelector('.GO-Results-Top-Price-TXT-Regular');
+                // Price — two layout variants: .GO-Results-Top-Price-TXT-Regular (detail layout) and .GO-Results-Price-TXT-Regular (compact layout)
+                const priceEl = row.querySelector('.GO-Results-Top-Price-TXT-Regular, .GO-Results-Price-TXT-Regular');
                 if (priceEl) listing.price = priceEl.textContent?.trim() ?? null;
 
-                // Thumbnail
-                const img = row.querySelector('.GO-Results-Top-Photo img') as HTMLImageElement | null;
+                // Thumbnail — two layout variants: .GO-Results-Top-Photo (detail) and .GO-Results-Photo (compact)
+                const img = row.querySelector('.GO-Results-Top-Photo img, .GO-Results-Photo img') as HTMLImageElement | null;
                 if (img) listing.thumbnail = img.src || img.getAttribute('data-src') || null;
 
-                // Specs from table rows
-                const specRows = row.querySelectorAll('.GO-Results-Top-Data-Top:not(.d-none) table tr');
+                // Specs from table rows — two layout variants: .GO-Results-Top-Data-Top (detail) and .GO-Results-Data (compact)
+                const specRows = row.querySelectorAll('.GO-Results-Top-Data-Top:not(.d-none) table tr, .GO-Results-Data table tr');
                 for (const tr of specRows) {
                     const cells = tr.querySelectorAll('td');
                     if (cells.length < 2) continue;
