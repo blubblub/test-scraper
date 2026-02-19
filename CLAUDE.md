@@ -25,6 +25,9 @@ Web scraper for avto.net car listings using Crawlee + Playwright.
 - Listing details: `https://www.avto.net/Ads/details.asp?...`
 - Behind Cloudflare — requires Playwright with real Chrome
 
+## Anti-Detection Guide
+See `docs/ANTI-DETECTION.md` for comprehensive anti-detection techniques (Cloudflare bypass, fingerprinting, proxy strategies, Camoufox, SessionPool config, etc.)
+
 ## Conventions
 - ESM modules (import/export)
 - Strict TypeScript
