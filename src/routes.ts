@@ -7,6 +7,14 @@ export const stats = new CrawlerStats(
     { info: console.log, warning: console.warn, error: console.error } as unknown as Log,
 );
 
+/** Max detail pages to scrape (0 = unlimited, -1 = skip details) */
+let maxDetails = 0;
+let detailsScraped = 0;
+
+export function setMaxDetails(n: number): void {
+    maxDetails = n;
+}
+
 export const router = createPlaywrightRouter();
 
 /**
@@ -204,13 +212,26 @@ async function handleSearchResults(
     log.info(`Page ${pageNum}: found ${listingUrls.length} listings (${newUrls.length} new)`);
     stats.recordPage(listingUrls.length);
 
-    // Enqueue new listing URLs for detail scraping
-    if (newUrls.length > 0) {
-        await enqueueLinks({
-            urls: newUrls,
-            label: 'DETAIL',
-        });
-        stats.recordEnqueued(newUrls.length);
+    // Enqueue new listing URLs for detail scraping (respecting maxDetails limit)
+    if (newUrls.length > 0 && maxDetails !== -1) {
+        let urlsToEnqueue = newUrls;
+        if (maxDetails > 0) {
+            const remaining = maxDetails - stats.getEnqueuedCount();
+            if (remaining <= 0) {
+                log.info(`Detail limit reached (${maxDetails}) — skipping enqueue`);
+                urlsToEnqueue = [];
+            } else if (remaining < newUrls.length) {
+                urlsToEnqueue = newUrls.slice(0, remaining);
+                log.info(`Enqueuing ${urlsToEnqueue.length}/${newUrls.length} (limit: ${maxDetails})`);
+            }
+        }
+        if (urlsToEnqueue.length > 0) {
+            await enqueueLinks({
+                urls: urlsToEnqueue,
+                label: 'DETAIL',
+            });
+            stats.recordEnqueued(urlsToEnqueue.length);
+        }
     }
 
     // Extract total results count
@@ -273,7 +294,9 @@ router.addHandler('DETAIL', async ({ page, log, request }) => {
     data.scrapedAt = new Date().toISOString();
 
     await Dataset.pushData(data);
-    log.info(`Scraped listing: ${data.title || 'unknown'} — ${data.price || 'no price'}`);
+    detailsScraped++;
+    stats.recordDetail();
+    log.info(`Scraped listing ${detailsScraped}: ${data.title || 'unknown'} — ${data.price || 'no price'}`);
 });
 
 /**
