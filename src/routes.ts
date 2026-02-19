@@ -133,8 +133,9 @@ async function extractSearchListings(page: Page, log: Log): Promise<SearchListin
                     const value = cells[1].textContent?.trim() ?? '';
                     if (!label || !value) continue;
 
-                    if (label.includes('registracija') || label.match(/^\d{4}$/)) {
-                        listing.year = value.match(/^\d{4}$/) ? value : label.match(/^\d{4}$/)?.[0] ?? value;
+                    if (label.includes('registracija') || label.match(/\d{4}/)) {
+                        const yearMatch = value.match(/\d{4}/) || label.match(/\d{4}/);
+                        listing.year = yearMatch?.[0] ?? value;
                     } else if (label.includes('Prevoženih') || label.includes('km')) {
                         listing.mileage = value;
                     } else if (label.includes('Gorivo')) {
