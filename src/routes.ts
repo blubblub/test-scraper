@@ -38,19 +38,19 @@ async function extractListingUrls(page: Page): Promise<string[]> {
  * avto.net uses various pagination patterns.
  */
 async function getNextPageUrl(page: Page, log: Log): Promise<string | null> {
-    // Try multiple pagination selectors
+    // Try multiple pagination selectors (ordered by specificity)
     const nextPageSelectors = [
-        // "Naslednja" = "Next" in Slovenian
+        // Primary: avto.net uses Bootstrap pagination with "Naprej" = "Next" in Slovenian
+        'ul.pagination.pagination-lg li.GO-Rounded-R:not(.disabled) a.page-link',
+        'ul.pagination li.GO-Rounded-R:not(.disabled) a.page-link',
+        // Fallback: text-based
+        'a.page-link:has-text("Naprej")',
         'a:has-text("Naslednja")',
         'a:has-text("naslednja")',
-        // Page navigation arrows
+        // Legacy selectors
         'a.Stranx:last-of-type',
-        // Generic next page patterns
         '.pagination a:last-child',
-        'a[title*="nasledn"]',
-        // The ">>" or ">" next button
         'a:has-text("»")',
-        'a:has-text(">")',
     ];
 
     for (const selector of nextPageSelectors) {
@@ -59,7 +59,6 @@ async function getNextPageUrl(page: Page, log: Log): Promise<string | null> {
             if (nextLink) {
                 const href = await nextLink.getAttribute('href');
                 if (href) {
-                    // Resolve relative URL
                     const absoluteUrl = new URL(href, page.url()).toString();
                     log.info(`Found next page: ${absoluteUrl}`);
                     return absoluteUrl;
@@ -72,6 +71,91 @@ async function getNextPageUrl(page: Page, log: Log): Promise<string | null> {
 
     log.info('No next page found — reached last page');
     return null;
+}
+
+/** Shape of a listing summary extracted from search results. */
+interface SearchListing {
+    title: string | null;
+    detailUrl: string | null;
+    listingId: string | null;
+    price: string | null;
+    thumbnail: string | null;
+    year: string | null;
+    mileage: string | null;
+    fuel: string | null;
+    transmission: string | null;
+    engine: string | null;
+}
+
+/**
+ * Extract listing card summaries from a search results page.
+ * Each .GO-Results-Row contains one listing with title, price, specs, and detail link.
+ */
+async function extractSearchListings(page: Page, log: Log): Promise<SearchListing[]> {
+    try {
+        return await page.evaluate(() => {
+            const rows = document.querySelectorAll('.GO-Results-Row');
+            const results: SearchListing[] = [];
+
+            for (const row of rows) {
+                const listing: SearchListing = {
+                    title: null, detailUrl: null, listingId: null,
+                    price: null, thumbnail: null,
+                    year: null, mileage: null, fuel: null, transmission: null, engine: null,
+                };
+
+                // Title
+                const naziv = row.querySelector('.GO-Results-Naziv');
+                if (naziv) listing.title = naziv.textContent?.trim() ?? null;
+
+                // Detail URL
+                const detailLink = row.querySelector('a[href*="details.asp"]') as HTMLAnchorElement | null;
+                if (detailLink) {
+                    listing.detailUrl = detailLink.href;
+                    const idMatch = detailLink.href.match(/[?&]id=(\d+)/i);
+                    listing.listingId = idMatch?.[1] ?? null;
+                }
+
+                // Price — two layout variants: .GO-Results-Top-Price-TXT-Regular (detail layout) and .GO-Results-Price-TXT-Regular (compact layout)
+                const priceEl = row.querySelector('.GO-Results-Top-Price-TXT-Regular, .GO-Results-Price-TXT-Regular');
+                if (priceEl) listing.price = priceEl.textContent?.trim() ?? null;
+
+                // Thumbnail — two layout variants: .GO-Results-Top-Photo (detail) and .GO-Results-Photo (compact)
+                const img = row.querySelector('.GO-Results-Top-Photo img, .GO-Results-Photo img') as HTMLImageElement | null;
+                if (img) listing.thumbnail = img.src || img.getAttribute('data-src') || null;
+
+                // Specs from table rows — two layout variants: .GO-Results-Top-Data-Top (detail) and .GO-Results-Data (compact)
+                const specRows = row.querySelectorAll('.GO-Results-Top-Data-Top:not(.d-none) table tr, .GO-Results-Data table tr');
+                for (const tr of specRows) {
+                    const cells = tr.querySelectorAll('td');
+                    if (cells.length < 2) continue;
+                    const label = cells[0].textContent?.trim() ?? '';
+                    const value = cells[1].textContent?.trim() ?? '';
+                    if (!label || !value) continue;
+
+                    if (label.includes('registracija') || label.match(/\d{4}/)) {
+                        const yearMatch = value.match(/\d{4}/) || label.match(/\d{4}/);
+                        listing.year = yearMatch?.[0] ?? value;
+                    } else if (label.includes('Prevoženih') || label.includes('km')) {
+                        listing.mileage = value;
+                    } else if (label.includes('Gorivo')) {
+                        listing.fuel = value;
+                    } else if (label.includes('Menjalnik')) {
+                        listing.transmission = value;
+                    } else if (label.includes('Motor')) {
+                        listing.engine = value;
+                    }
+                }
+
+                results.push(listing);
+            }
+
+            return results;
+        });
+    } catch (e) {
+        log.warning(`Failed to extract search listings: ${e}`);
+        return [];
+    }
 }
 
 /**
@@ -91,7 +175,7 @@ async function handleSearchResults(
     // Wait for results to load (Cloudflare might delay)
     try {
         await page.waitForSelector(
-            'a[href*="details.asp"], .ResultsAd, .GO-Results-498',
+            '.GO-Results-Row, a[href*="details.asp"], .ResultsAd',
             { timeout: 30_000 },
         );
     } catch {
@@ -100,8 +184,21 @@ async function handleSearchResults(
         return;
     }
 
-    // Extract listing URLs
-    const listingUrls = await extractListingUrls(page);
+    // Extract listing card summaries from the search page
+    const listings = await extractSearchListings(page, log);
+    log.info(`Page ${pageNum}: extracted ${listings.length} listing summaries`);
+
+    // Push listing summaries to dataset
+    if (listings.length > 0) {
+        for (const listing of listings) {
+            await Dataset.pushData({ ...listing, searchPage: pageNum, label: 'search-listing' });
+        }
+    }
+
+    // Extract listing URLs for detail scraping
+    const listingUrls = listings
+        .map((l) => l.detailUrl)
+        .filter((url): url is string => !!url);
     const newUrls = stats.deduplicateUrls(listingUrls);
 
     log.info(`Page ${pageNum}: found ${listingUrls.length} listings (${newUrls.length} new)`);
@@ -114,6 +211,15 @@ async function handleSearchResults(
             label: 'DETAIL',
         });
         stats.recordEnqueued(newUrls.length);
+    }
+
+    // Extract total results count
+    const totalCount = await page.evaluate(() => {
+        const match = document.body.textContent?.match(/(\d+)\s*oglasov/);
+        return match ? parseInt(match[1], 10) : null;
+    });
+    if (totalCount && pageNum === 1) {
+        log.info(`Total results: ${totalCount} oglasov`);
     }
 
     // Find and enqueue next page
